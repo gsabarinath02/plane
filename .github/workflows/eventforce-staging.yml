@@ -1,0 +1,244 @@
+name: Eventforce staging
+
+on:
+  pull_request:
+    branches:
+      - eventforce-staging
+  push:
+    branches:
+      - eventforce-staging
+  workflow_dispatch:
+
+concurrency:
+  group: eventforce-staging-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_ACCOUNT_ID: "699258777121"
+  AWS_REGION: ap-south-1
+  AWS_ROLE_ARN: arn:aws:iam::699258777121:role/plane-staging-github-deploy
+  ECR_REPOSITORY: 699258777121.dkr.ecr.ap-south-1.amazonaws.com/plane-staging
+
+jobs:
+  infrastructure-check:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.3"
+
+      - name: Check Terraform formatting
+        working-directory: deployments/eventforce/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Initialize without remote state
+        working-directory: deployments/eventforce/terraform
+        run: terraform init -backend=false
+
+      - name: Validate Terraform
+        working-directory: deployments/eventforce/terraform
+        run: terraform validate
+
+      - name: Validate deployment scripts
+        run: |
+          bash -n deployments/eventforce/deploy.sh
+          bash -n deployments/eventforce/backup.sh
+
+  application-check:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Resolve pnpm store
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm check:lint
+
+      - name: Type-check
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: pnpm check:types
+
+  build-images:
+    name: Build ${{ matrix.service }}
+    if: github.event_name != 'pull_request'
+    needs:
+      - infrastructure-check
+      - application-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: true
+      max-parallel: 3
+      matrix:
+        include:
+          - service: frontend
+            context: .
+            dockerfile: apps/web/Dockerfile.web
+          - service: space
+            context: .
+            dockerfile: apps/space/Dockerfile.space
+          - service: admin
+            context: .
+            dockerfile: apps/admin/Dockerfile.admin
+          - service: live
+            context: .
+            dockerfile: apps/live/Dockerfile.live
+          - service: backend
+            context: apps/api
+            dockerfile: apps/api/Dockerfile.api
+          - service: proxy
+            context: apps/proxy
+            dockerfile: apps/proxy/Dockerfile.ce
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: plane-${{ github.run_id }}-${{ matrix.service }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          translate-env-variables: false
+
+      - name: Sign in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.1.6
+
+      - name: Check for an existing immutable image
+        id: image
+        env:
+          IMAGE_TAG: ${{ matrix.service }}-${{ github.sha }}
+        run: |
+          if aws ecr describe-images \
+            --repository-name plane-staging \
+            --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push immutable image
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.ECR_REPOSITORY }}:${{ matrix.service }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          provenance: mode=max
+          sbom: true
+
+  deploy:
+    name: Deploy to plane.eventforce.in
+    if: github.event_name != 'pull_request'
+    needs: build-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: https://plane.eventforce.in
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: plane-${{ github.run_id }}-deploy
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          translate-env-variables: false
+
+      - name: Deploy through AWS Systems Manager
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              Name=tag:Name,Values=plane-staging \
+              Name=instance-state-name,Values=running \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
+
+          if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
+            echo "No running plane-staging instance was found" >&2
+            exit 1
+          fi
+
+          PARAMETERS=$(jq -cn --arg command "sudo /opt/plane/deploy.sh $RELEASE_SHA" '{commands:[$command]}')
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy Plane $RELEASE_SHA from GitHub Actions" \
+            --parameters "$PARAMETERS" \
+            --query Command.CommandId \
+            --output text)
+
+          set +e
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+          WAIT_STATUS=$?
+          set -e
+
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Errors:StandardErrorContent}' \
+            --output json
+
+          [[ "$WAIT_STATUS" -eq 0 ]]
+
+      - name: Verify the public deployment
+        run: |
+          curl --fail --show-error --silent \
+            --retry 18 --retry-delay 10 --retry-all-errors \
+            --max-time 15 \
+            https://plane.eventforce.in/ >/dev/null

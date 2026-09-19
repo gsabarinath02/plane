@@ -1,0 +1,234 @@
+name: plane-staging
+
+x-app-env: &app-env
+  WEB_URL: ${WEB_URL}
+  DEBUG: "0"
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+  GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@plane-db:5432/${POSTGRES_DB}
+  REDIS_URL: redis://plane-redis:6379/
+  AMQP_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@plane-mq:5672/${RABBITMQ_VHOST}
+  SECRET_KEY: ${SECRET_KEY}
+  LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY}
+  USE_MINIO: "1"
+  AWS_REGION: ${AWS_REGION}
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  AWS_S3_ENDPOINT_URL: http://plane-minio:9000
+  AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+  MINIO_ENDPOINT_SSL: "0"
+  FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-26214400}
+  API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
+  AUTHENTICATION_RATE_LIMIT: ${AUTHENTICATION_RATE_LIMIT:-10/minute}
+  TRUSTED_PROXIES: 0.0.0.0/0
+
+x-backend: &backend
+  image: ${ECR_REPOSITORY}:backend-${IMAGE_TAG}
+  restart: unless-stopped
+  environment:
+    <<: *app-env
+  depends_on:
+    plane-db:
+      condition: service_healthy
+    plane-redis:
+      condition: service_healthy
+    plane-mq:
+      condition: service_healthy
+    plane-minio-init:
+      condition: service_completed_successfully
+  logging:
+    options:
+      max-size: 20m
+      max-file: "5"
+
+services:
+  web:
+    image: ${ECR_REPOSITORY}:frontend-${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  space:
+    image: ${ECR_REPOSITORY}:space-${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  admin:
+    image: ${ECR_REPOSITORY}:admin-${IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  live:
+    image: ${ECR_REPOSITORY}:live-${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: http://api:8000
+      REDIS_URL: redis://plane-redis:6379/
+      LIVE_SERVER_SECRET_KEY: ${LIVE_SERVER_SECRET_KEY}
+    depends_on:
+      api:
+        condition: service_started
+      plane-redis:
+        condition: service_healthy
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  api:
+    <<: *backend
+    command: ./bin/docker-entrypoint-api.sh
+
+  worker:
+    <<: *backend
+    command: ./bin/docker-entrypoint-worker.sh
+
+  beat-worker:
+    <<: *backend
+    command: ./bin/docker-entrypoint-beat.sh
+
+  migrator:
+    <<: *backend
+    restart: "no"
+    command: ./bin/docker-entrypoint-migrator.sh
+
+  plane-db:
+    image: postgres:15.7-alpine
+    restart: unless-stopped
+    command: postgres -c max_connections=300
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    command: valkey-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  plane-mq:
+    image: rabbitmq:3.13.6-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  plane-minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    command: server /export --console-address :9090
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - uploads:/export
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  plane-minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    restart: "no"
+    depends_on:
+      plane-minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+    entrypoint: >-
+      /bin/sh -c '
+      until mc alias set plane http://plane-minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do sleep 2; done;
+      mc mb --ignore-existing "plane/$${AWS_S3_BUCKET_NAME}"
+      '
+    logging:
+      options:
+        max-size: 20m
+        max-file: "2"
+
+  proxy:
+    image: ${ECR_REPOSITORY}:proxy-${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-26214400}
+      BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
+      SITE_ADDRESS: :80
+      CERT_EMAIL: ""
+      CERT_ACME_DNS: ""
+    ports:
+      - 80:80
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_started
+      space:
+        condition: service_started
+      admin:
+        condition: service_started
+      live:
+        condition: service_started
+    logging:
+      options:
+        max-size: 20m
+        max-file: "5"
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmq_data:
+  uploads:

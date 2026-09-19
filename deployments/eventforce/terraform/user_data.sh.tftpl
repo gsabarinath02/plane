@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Amazon Linux 2023 ships curl-minimal by default. Installing the full curl
+# package creates a transaction conflict, while the bundled CLI is sufficient
+# for downloading the Compose plugin.
+# The official AL2023 AMI already includes AWS CLI v2.
+dnf install -y docker jq openssl util-linux
+systemctl enable --now docker
+systemctl enable --now amazon-ssm-agent
+
+mkdir -p /usr/local/lib/docker/cli-plugins /opt/plane/backups
+if ! docker compose version >/dev/null 2>&1; then
+  curl --fail --silent --show-error --location \
+    https://github.com/docker/compose/releases/download/v2.39.4/docker-compose-linux-x86_64 \
+    --output /usr/local/lib/docker/cli-plugins/docker-compose
+  chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+fi
+
+cat >/etc/docker/daemon.json <<'JSON'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "5"
+  },
+  "live-restore": true
+}
+JSON
+systemctl restart docker
+
+if [[ ! -f /opt/plane/runtime.env ]]; then
+  umask 077
+  cat >/opt/plane/runtime.env <<ENV
+APP_DOMAIN=${domain_name}
+WEB_URL=https://${domain_name}
+CORS_ALLOWED_ORIGINS=https://${domain_name}
+AWS_REGION=${aws_region}
+ECR_REPOSITORY=${ecr_repository}
+IMAGE_TAG=bootstrap
+BACKUP_BUCKET=${backup_bucket}
+POSTGRES_USER=plane
+POSTGRES_DB=plane
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+RABBITMQ_USER=plane
+RABBITMQ_PASSWORD=$(openssl rand -hex 32)
+RABBITMQ_VHOST=plane
+MINIO_ROOT_USER=$(openssl rand -hex 16)
+MINIO_ROOT_PASSWORD=$(openssl rand -hex 32)
+AWS_S3_BUCKET_NAME=uploads
+SECRET_KEY=$(openssl rand -hex 64)
+LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 64)
+FILE_SIZE_LIMIT=26214400
+GUNICORN_WORKERS=2
+ENV
+fi
+chmod 0600 /opt/plane/runtime.env
+
+printf '%s' '${deploy_script}' | base64 --decode >/opt/plane/deploy.sh
+printf '%s' '${backup_script}' | base64 --decode >/opt/plane/backup.sh
+chmod 0750 /opt/plane/deploy.sh /opt/plane/backup.sh
+
+cat >/etc/systemd/system/plane-backup.service <<'UNIT'
+[Unit]
+Description=Back up Plane staging data to S3
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/plane/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UNIT
+
+cat >/etc/systemd/system/plane-backup.timer <<'UNIT'
+[Unit]
+Description=Daily Plane staging backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now plane-backup.timer
