@@ -190,6 +190,15 @@ resource "aws_security_group" "plane" {
   tags = { Name = local.name }
 }
 
+resource "aws_vpc_security_group_egress_rule" "alb_to_plane" {
+  security_group_id            = one(data.aws_lb.staging.security_groups)
+  referenced_security_group_id = aws_security_group.plane.id
+  description                  = "Eventforce staging ALB to Plane staging HTTP"
+  ip_protocol                  = "tcp"
+  from_port                    = 80
+  to_port                      = 80
+}
+
 resource "aws_instance" "plane" {
   ami                         = data.aws_ami.amazon_linux.id
   instance_type               = var.instance_type

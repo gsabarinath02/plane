@@ -23,6 +23,37 @@ env:
   ECR_REPOSITORY: 699258777121.dkr.ecr.ap-south-1.amazonaws.com/plane-staging
 
 jobs:
+  changes:
+    name: Detect application changes
+    runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.paths.outputs.application }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: paths
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || -z "$BEFORE_SHA" || "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo "application=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BEFORE_SHA" "$HEAD_SHA" -- \
+            . \
+            ':(exclude).github/workflows/eventforce-staging.yml' \
+            ':(exclude)deployments/eventforce/README.md' \
+            ':(exclude)deployments/eventforce/terraform/**'; then
+            echo "application=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "application=true" >> "$GITHUB_OUTPUT"
+          fi
+
   infrastructure-check:
     name: Validate Terraform
     runs-on: ubuntu-latest
@@ -94,8 +125,9 @@ jobs:
 
   build-images:
     name: Build ${{ matrix.service }}
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.changes.outputs.application == 'true'
     needs:
+      - changes
       - infrastructure-check
       - application-check
     runs-on: ubuntu-24.04
