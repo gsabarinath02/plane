@@ -13,6 +13,7 @@
     "check:lint": "oxlint --max-warnings=11957 .",
     "check:types": "react-router typegen && tsc --noEmit",
     "check:format": "oxfmt --check .",
+    "test:unit": "node --experimental-strip-types --test core/components/analytics/overview/people-activity.utils.test.mjs",
     "fix:lint": "oxlint --fix .",
     "fix:format": "oxfmt ."
   },

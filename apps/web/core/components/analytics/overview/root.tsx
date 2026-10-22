@@ -8,6 +8,7 @@ import React from "react";
 import AnalyticsWrapper from "../analytics-wrapper";
 import TotalInsights from "../total-insights";
 import ActiveProjects from "./active-projects";
+import PeopleActivity from "./people-activity";
 import ProjectInsights from "./project-insights";
 
 function Overview() {
@@ -15,6 +16,7 @@ function Overview() {
     <AnalyticsWrapper i18nTitle="common.overview">
       <div className="flex flex-col gap-14">
         <TotalInsights analyticsType="overview" />
+        <PeopleActivity />
         <div className="grid grid-cols-1 gap-14 md:grid-cols-5">
           <ProjectInsights />
           <ActiveProjects />

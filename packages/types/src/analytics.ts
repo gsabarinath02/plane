@@ -49,6 +49,10 @@ export type TAnalyticsFilterParams = {
   project_ids?: string;
   cycle_id?: string;
   module_id?: string;
+  x_axis?: ChartXAxisProperty;
+  group_by?: ChartXAxisProperty;
+  y_axis?: ChartYAxisMetric;
+  epic?: boolean;
 };
 
 // service types
