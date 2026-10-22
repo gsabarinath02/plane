@@ -5,6 +5,7 @@
  */
 
 import { observer } from "mobx-react";
+import { useId, useState } from "react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
 import type { TChart } from "@plane/types";
@@ -12,7 +13,11 @@ import { ChartXAxisProperty } from "@plane/types";
 import { useAnalytics } from "@/hooks/store/use-analytics";
 import { AnalyticsService } from "@/services/analytics.service";
 import AnalyticsSectionWrapper from "../analytics-section-wrapper";
-import { getPeopleActivityRanking } from "./people-activity.utils";
+import {
+  getPeopleActivityRanking,
+  getVisiblePeopleActivityRanking,
+  PEOPLE_RANKING_PREVIEW_SIZE,
+} from "./people-activity.utils";
 import type { TPersonCount } from "./people-activity.utils";
 
 const analyticsService = new AnalyticsService();
@@ -28,6 +33,8 @@ type TPeopleRankingProps = {
 };
 
 function PeopleRanking({ title, description, emptyMessage, color, entries, isLoading, hasError }: TPeopleRankingProps) {
+  const rankingId = useId();
+  const [showAll, setShowAll] = useState(false);
   const total = entries.reduce((sum, entry) => sum + entry.count, 0);
   const topCount = entries[0]?.count ?? 0;
 
@@ -52,27 +59,40 @@ function PeopleRanking({ title, description, emptyMessage, color, entries, isLoa
       ) : entries.length === 0 ? (
         <p className="mt-6 text-13 text-tertiary">{emptyMessage}</p>
       ) : (
-        <ol className="mt-6 space-y-4">
-          {entries.slice(0, 5).map((entry, index) => (
-            <li key={entry.id} className="min-w-0">
-              <div className="mb-1.5 flex items-center justify-between gap-3 text-13">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="w-4 shrink-0 text-12 text-tertiary tabular-nums">{index + 1}</span>
-                  <span className="truncate text-primary" title={entry.name}>
-                    {entry.name}
-                  </span>
+        <>
+          <ol id={rankingId} className="mt-6 space-y-4">
+            {getVisiblePeopleActivityRanking(entries, showAll).map((entry, index) => (
+              <li key={entry.id} className="min-w-0">
+                <div className="mb-1.5 flex items-center justify-between gap-3 text-13">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="w-4 shrink-0 text-12 text-tertiary tabular-nums">{index + 1}</span>
+                    <span className="truncate text-primary" title={entry.name}>
+                      {entry.name}
+                    </span>
+                  </div>
+                  <span className="shrink-0 font-medium text-primary tabular-nums">{entry.count}</span>
                 </div>
-                <span className="shrink-0 font-medium text-primary tabular-nums">{entry.count}</span>
-              </div>
-              <div className="ml-6 h-1.5 overflow-hidden rounded-full bg-layer-1" aria-hidden="true">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${(entry.count / topCount) * 100}%`, backgroundColor: color }}
-                />
-              </div>
-            </li>
-          ))}
-        </ol>
+                <div className="ml-6 h-1.5 overflow-hidden rounded-full bg-layer-1" aria-hidden="true">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${(entry.count / topCount) * 100}%`, backgroundColor: color }}
+                  />
+                </div>
+              </li>
+            ))}
+          </ol>
+          {entries.length > PEOPLE_RANKING_PREVIEW_SIZE && (
+            <button
+              type="button"
+              className="mt-4 ml-6 rounded-sm text-12 font-medium text-accent-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              aria-controls={rankingId}
+              aria-expanded={showAll}
+              onClick={() => setShowAll((value) => !value)}
+            >
+              {showAll ? `Show top ${PEOPLE_RANKING_PREVIEW_SIZE}` : `Show all ${entries.length}`}
+            </button>
+          )}
+        </>
       )}
     </div>
   );

@@ -14,6 +14,11 @@ export type TPersonCount = {
   count: number;
 };
 
+export const PEOPLE_RANKING_PREVIEW_SIZE = 5;
+
+export const getVisiblePeopleActivityRanking = (entries: TPersonCount[], showAll: boolean): TPersonCount[] =>
+  showAll ? entries : entries.slice(0, PEOPLE_RANKING_PREVIEW_SIZE);
+
 export const getPeopleActivityRanking = (chart: TChart | undefined, metric: TPeopleActivityMetric): TPersonCount[] => {
   if (!chart) return [];
 

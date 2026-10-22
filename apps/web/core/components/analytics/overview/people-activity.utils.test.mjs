@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getPeopleActivityRanking } from "./people-activity.utils.ts";
+import { getPeopleActivityRanking, getVisiblePeopleActivityRanking } from "./people-activity.utils.ts";
 
 test("ranks creators by ticket count and labels an unknown creator", () => {
   const chart = {
@@ -52,4 +52,16 @@ test("shows no completion ranking when no tickets are completed", () => {
     []
   );
   assert.deepEqual(getPeopleActivityRanking(undefined, "created"), []);
+});
+
+test("shows five people by default and all people when expanded", () => {
+  const entries = Array.from({ length: 7 }, (_, index) => ({
+    id: String(index),
+    name: `Person ${index + 1}`,
+    count: 7 - index,
+  }));
+
+  assert.deepEqual(getVisiblePeopleActivityRanking(entries, false), entries.slice(0, 5));
+  assert.deepEqual(getVisiblePeopleActivityRanking(entries, true), entries);
+  assert.equal(entries.length, 7);
 });
