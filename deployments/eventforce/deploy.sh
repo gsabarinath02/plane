@@ -49,7 +49,7 @@ rollback() {
 trap rollback ERR
 
 compose config --quiet
-compose pull
+compose pull web space admin live api worker beat-worker migrator proxy
 compose up --detach plane-db plane-redis plane-mq plane-minio
 compose run --rm migrator
 compose up --detach --remove-orphans web space admin live api worker beat-worker proxy

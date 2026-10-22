@@ -247,7 +247,10 @@ jobs:
             exit 1
           fi
 
-          PARAMETERS=$(jq -cn --arg command "sudo /opt/plane/deploy.sh $RELEASE_SHA" '{commands:[$command]}')
+          SCRIPT_URL="https://raw.githubusercontent.com/gsabarinath02/plane/$RELEASE_SHA/deployments/eventforce/deploy.sh"
+          REMOTE_SCRIPT="/opt/plane/deploy.sh.$RELEASE_SHA"
+          REMOTE_COMMAND="set -eu; curl --fail --silent --show-error --location '$SCRIPT_URL' --output '$REMOTE_SCRIPT' && bash -n '$REMOTE_SCRIPT' && install -m 0755 '$REMOTE_SCRIPT' /opt/plane/deploy.sh && rm -f '$REMOTE_SCRIPT' && /opt/plane/deploy.sh $RELEASE_SHA"
+          PARAMETERS=$(jq -cn --arg command "$REMOTE_COMMAND" '{commands:[$command]}')
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
